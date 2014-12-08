@@ -1,4 +1,3 @@
-#
 # Cookbook Name:: artifact
 # Provider:: deploy
 #
@@ -92,14 +91,12 @@ def load_current_resource
     @artifact_location = @new_resource.artifact_location
   end
 
-  @release_path                = get_release_path
   @current_path                = @new_resource.current_path
   @shared_path                 = @new_resource.shared_path
   @artifact_cache              = ::File.join(@new_resource.artifact_deploys_cache_path, @new_resource.name)
   @artifact_cache_version_path = ::File.join(artifact_cache, artifact_version)
   @previous_version_paths      = get_previous_version_paths
   @previous_version_numbers    = get_previous_version_numbers
-  @manifest_file               = ::File.join(@release_path, "manifest.yaml")
   @deploy                      = false
   @skip_manifest_check         = @new_resource.skip_manifest_check
   @remove_on_force             = @new_resource.remove_on_force
@@ -111,24 +108,29 @@ end
 
 action :deploy do
   delete_current_if_forcing!
+  setup_cache_directories!
+
+  retrieve_artifact!
+
+  @release_path = get_release_path
+  @manifest_file = ::File.join(@release_path, "manifest.yaml")
+
   setup_deploy_directories!
   setup_shared_directories!
 
-  @deploy = manifest_differences?
+  run_proc :before_extract
+  if new_resource.is_tarball
+    extract_artifact!
+  else
+    copy_artifact
+  end
+  run_proc :after_extract
 
-  retrieve_artifact!
+  @deploy = manifest_differences?
 
   run_proc :before_deploy
 
   if deploy?
-    run_proc :before_extract
-    if new_resource.is_tarball
-      extract_artifact!
-    else
-      copy_artifact
-    end
-    run_proc :after_extract
-
     run_proc :before_symlink
     symlink_it_up!
     run_proc :after_symlink
@@ -217,7 +219,7 @@ end
 # @return [void]
 def extract_artifact!
   recipe_eval do
-    case ::File.extname(cached_tar_path)
+    case cached_tar_path
     when /(tar|tgz|tar\.gz|tbz2|tbz|tar\.xz)$/
 
       taropts = [ '-x' ]
@@ -503,7 +505,12 @@ private
   #
   # @return [String] the artifacts release path
   def get_release_path
-    ::File.join(new_resource.deploy_to, "releases", artifact_version)
+    dir_name = artifact_version
+    if new_resource.is_tarball
+      dir_name << '-' + Digest::MD5.hexdigest(cached_tar_path)
+    end
+    puts dir_name
+    ::File.join(new_resource.deploy_to, "releases", dir_name)
   end
 
   # Searches the releases directory and returns an Array of version folders. After
@@ -553,14 +560,10 @@ private
     end
   end
 
-  # Creates directories that are necessary for installing
-  # the artifact.
-  #
-  # @return [void]
-  def setup_deploy_directories!
+  def create_directories(list)
     recipe_eval do
-      [ artifact_cache_version_path, release_path, shared_path ].each do |path|
-        Chef::Log.info "artifact_deploy[setup_deploy_directories!] Creating #{path}"
+      list.each do |path|
+        Chef::Log.info "artifact_deploy[create_directories] Creating #{path}"
         directory path do
           owner new_resource.owner
           group new_resource.group
@@ -571,22 +574,28 @@ private
     end
   end
 
+  # Creates directories that are necessary for retrieving
+  # the artifact.
+  #
+  # @return [void]
+  def setup_cache_directories!
+    create_directories [artifact_cache_version_path]
+  end
+
+  # Creates directories that are necessary for installing
+  # the artifact.
+  #
+  # @return [void]
+  def setup_deploy_directories!
+    create_directories [release_path, shared_path]
+  end
+
   # Creates directories that are defined in the shared_directories
   # attribute of the resource.
   #
   # @return [void]
   def setup_shared_directories!
-    recipe_eval do
-      new_resource.shared_directories.each do |dir|
-        Chef::Log.info "artifact_deploy[setup_shared_directories!] Creating #{shared_path}/#{dir}"
-        directory "#{shared_path}/#{dir}" do
-          owner new_resource.owner
-          group new_resource.group
-          mode '0755'
-          recursive true
-        end
-      end
-    end
+    create_directories new_resource.shared_directories.map { |dir| "#{shared_path}/#{dir}" }
   end
 
   # Retrieves the configured artifact based on the
